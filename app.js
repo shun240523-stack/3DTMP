@@ -11,6 +11,9 @@ let offset = new THREE.Vector3();
 let intersection = new THREE.Vector3();
 let highlightBox = null;
 
+// View Mode State
+let currentViewMode = '3d'; // '3d' or '2d'
+
 // Simulation variables
 let simInterval = null;
 let simActive = false;
@@ -117,6 +120,9 @@ function init() {
     // Load default flowchart project mirroring image_73d182.jpg
     loadDefaultProject();
     
+    // Bind Header View Switcher buttons interactivity
+    setupViewModeSwitcher();
+    
     // Start rendering cycle
     animate();
     
@@ -183,86 +189,80 @@ function createTextTexture(title, desc, type, isSelected = false) {
     return texture;
 }
 
-// 3. GENERATE 3D NODE OBJECT
+// 3. GENERATE 3D NODE OBJECT WITH RESOLVED DECAL PLANES (No texture warping anymore!)
 function createNodeMesh(data) {
-    let geometry;
+    const group = new THREE.Group();
     const w = data.width || 2.4;
     const h = data.height || 1.2;
     const d = data.depth || 0.3;
 
-    // Tailoring distinct shapes as shown in image_73d182.jpg
+    // 1. Solid 3D Base Body (Background shape without front texture wrapping)
+    let bodyGeometry;
+    let bodyColorHex = COLORS[data.type] || 0x1f2937;
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: bodyColorHex,
+        roughness: 0.4,
+        metalness: 0.3
+    });
+
     if (data.type === 'start') {
-        // Round pill capsule shape
-        geometry = new THREE.BoxGeometry(w, h, d); // Simple base, texture details represent visual pill
+        bodyGeometry = new THREE.BoxGeometry(w, h, d);
     } else if (data.type === 'decision') {
-        // Diamond shape
+        // Precise Diamond / Rhombus 3D geometry shape
         const shape = new THREE.Shape();
         shape.moveTo(0, h/2);
         shape.lineTo(w/2, 0);
         shape.lineTo(0, -h/2);
         shape.lineTo(-w/2, 0);
         shape.lineTo(0, h/2);
-        const extrudeSettings = { depth: d, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.03, bevelThickness: 0.03 };
-        geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-        geometry.center();
+        const extrudeSettings = { depth: d, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.02, bevelThickness: 0.02 };
+        bodyGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        bodyGeometry.center();
     } else if (data.type === 'io') {
-        // Parallelogram shape
+        // Skewed Parallelogram 3D shape
         const shape = new THREE.Shape();
         shape.moveTo(-w/2 + 0.3, h/2);
         shape.lineTo(w/2, h/2);
         shape.lineTo(w/2 - 0.3, -h/2);
         shape.lineTo(-w/2, -h/2);
         shape.lineTo(-w/2 + 0.3, h/2);
-        const extrudeSettings = { depth: d, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.03, bevelThickness: 0.03 };
-        geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-        geometry.center();
+        const extrudeSettings = { depth: d, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.02, bevelThickness: 0.02 };
+        bodyGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        bodyGeometry.center();
     } else {
-        // Processing box
-        geometry = new THREE.BoxGeometry(w, h, d);
+        bodyGeometry = new THREE.BoxGeometry(w, h, d);
     }
 
-    // Create Node Textures
+    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    bodyMesh.castShadow = true;
+    bodyMesh.receiveShadow = true;
+    group.add(bodyMesh);
+
+    // 2. High-Fidelity Front Decal Plate (Guarantees zero texture distortion)
+    // Scale down slightly to provide a stylish border effect on 3D shapes
+    const pw = w * 0.92;
+    const ph = h * 0.92;
+    const plateGeometry = new THREE.PlaneGeometry(pw, ph);
+
     const texture = createTextTexture(data.title, data.desc, data.type, false);
-    
-    // Build Front and generic face materials
-    const frontMaterial = new THREE.MeshStandardMaterial({
+    const plateMaterial = new THREE.MeshStandardMaterial({
         map: texture,
+        transparent: true,
         roughness: 0.2,
-        metalness: 0.1
+        metalness: 0.1,
+        side: THREE.DoubleSide
     });
 
-    // Color base for other faces
-    let backColorHex = COLORS[data.type] || 0x1f2937;
-    const sideMaterial = new THREE.MeshStandardMaterial({
-        color: backColorHex,
-        roughness: 0.4,
-        metalness: 0.3
-    });
+    const plateMesh = new THREE.Mesh(plateGeometry, plateMaterial);
+    // Offset slightly forward along Z-axis to avoid Z-fighting (overlay depth)
+    plateMesh.position.set(0, 0, d/2 + 0.005);
+    group.add(plateMesh);
 
-    // Node multi-material implementation
-    let materials;
-    if (data.type === 'decision' || data.type === 'io') {
-        // Extruded geometries require index mapping
-        materials = [frontMaterial, sideMaterial];
-    } else {
-        // Box Geometry maps [right, left, top, bottom, front, back]
-        materials = [
-            sideMaterial,  // Right
-            sideMaterial,  // Left
-            sideMaterial,  // Top
-            sideMaterial,  // Bottom
-            frontMaterial, // Front (main screen text)
-            sideMaterial   // Back
-        ];
-    }
-
-    const mesh = new THREE.Mesh(geometry, materials);
-    mesh.position.set(data.x, data.y, data.z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.userData = { nodeId: data.id };
+    // Group Translation setup
+    group.position.set(data.x, data.y, data.z);
+    group.userData = { nodeId: data.id };
     
-    return mesh;
+    return group;
 }
 
 // 4. DRAW CONNECTION LINES WITH ARROWS
@@ -619,22 +619,33 @@ function onPointerDown(event) {
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     raycaster.setFromCamera(mouse, camera);
-    const intersects = raycaster.intersectObjects(nodes.map(n => n.mesh));
+    
+    // Traverses Groups to check intersection recursively
+    const intersects = raycaster.intersectObjects(nodes.map(n => n.mesh), true);
 
     if (intersects.length > 0) {
-        const hitMesh = intersects[0].object;
-        const node = nodes.find(n => n.id === hitMesh.userData.nodeId);
+        let hitMesh = intersects[0].object;
         
-        // Select node representation
-        selectNode(node);
-        
-        // Disable Orbit camera orbit controls during item sliding movement
-        controls.enabled = false;
-        isDragging = true;
+        // Find top-level Node Group in Parent hierarchies
+        let nodeGroup = hitMesh;
+        while (nodeGroup && !nodeGroup.userData?.nodeId) {
+            nodeGroup = nodeGroup.parent;
+        }
 
-        // Drag positioning projection calculation
-        if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
-            offset.copy(intersection).sub(hitMesh.position);
+        if (nodeGroup) {
+            const node = nodes.find(n => n.id === nodeGroup.userData.nodeId);
+            
+            // Select node representation
+            selectNode(node);
+            
+            // Disable Orbit camera orbit controls during item sliding movement
+            controls.enabled = false;
+            isDragging = true;
+
+            // Drag positioning projection calculation
+            if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
+                offset.copy(intersection).sub(nodeGroup.position);
+            }
         }
     }
 }
@@ -654,7 +665,7 @@ function onPointerMove(event) {
             selectedNode.z = Math.round(nextPos.z * 2) / 2;
             // Y axis is vertical, modified via side parameters only while dragging X-Z plane
 
-            // Sync visual mesh translation
+            // Sync visual mesh translation (Works perfectly on Groups as well)
             selectedNode.mesh.position.set(selectedNode.x, selectedNode.y, selectedNode.z);
             highlightBox.position.copy(selectedNode.mesh.position);
 
@@ -693,11 +704,16 @@ function onWindowResize() {
 }
 
 function resetCamera() {
-    camera.position.set(12, 8.5, 14);
-    if (controls) {
+    if (currentViewMode === '2d') {
+        camera.position.set(0, 25, 0.01);
         controls.target.set(0, 0, 0);
-        controls.update();
+    } else {
+        camera.position.set(12, 8.5, 14);
+        if (controls) {
+            controls.target.set(0, 0, 0);
+        }
     }
+    if (controls) controls.update();
     updateFooterDiagnostics();
 }
 
@@ -705,6 +721,51 @@ function updateFooterDiagnostics() {
     if (!camera) return;
     const posText = `カメラ位置: X: ${camera.position.x.toFixed(1)} Y: ${camera.position.y.toFixed(1)} Z: ${camera.position.z.toFixed(1)}`;
     document.getElementById('status-camera-pos').innerText = posText;
+}
+
+// 12-B. INTERACTIVE VIEWPORT MODE SWITCHER (2D / 3D Layout toggles)
+function setupViewModeSwitcher() {
+    // Target the Header buttons container
+    const buttons = document.querySelectorAll('header div.bg-\\[\\#0c0d12\\] button');
+    if (buttons.length >= 2) {
+        const btn2D = buttons[0];
+        const btn3D = buttons[1];
+        
+        btn2D.addEventListener('click', () => {
+            switchViewMode('2d');
+            btn2D.className = "px-3 py-1 text-xs text-white bg-blue-600/80 rounded font-semibold shadow transition";
+            btn3D.className = "px-3 py-1 text-xs text-gray-400 hover:text-white rounded transition";
+        });
+        
+        btn3D.addEventListener('click', () => {
+            switchViewMode('3d');
+            btn3D.className = "px-3 py-1 text-xs text-white bg-blue-600/80 rounded font-semibold shadow transition";
+            btn2D.className = "px-3 py-1 text-xs text-gray-400 hover:text-white rounded transition";
+        });
+    }
+}
+
+function switchViewMode(mode) {
+    if (currentViewMode === mode) return;
+    currentViewMode = mode;
+
+    if (mode === '2d') {
+        addLog("2D作図ビューモードに切り替えました。カメラをトップダウンに固定します。", "info");
+        showToast("2Dビュー有効");
+
+        controls.target.set(0, 0, 0);
+        // Position camera directly overhead (almost zero on Z to prevent gimbal lock)
+        camera.position.set(0, 24, 0.01);
+        controls.enableRotate = false; // Lock Orbit rotation controls
+        controls.update();
+    } else {
+        addLog("3Dビューモードに切り替えました。自由回転操作が有効です。", "info");
+        showToast("3Dビュー有効");
+
+        controls.enableRotate = true; // Unlock Orbit rotation controls
+        resetCamera();
+    }
+    updateFooterDiagnostics();
 }
 
 // 13. FLOWCHART INTERACTIVE SIMULATOR (Executes node paths step-by-step)
@@ -821,20 +882,29 @@ function highlightSimulatingNode(node) {
     // Update panel text
     document.getElementById('sim-current-node-label').innerText = node.title;
 
-    // Simple visual mesh glowing effect using emissive parameters on multi-material faces
+    // Reset emissive values recursively on node sub-meshes (since nodes are groups now)
     nodes.forEach(n => {
         if (n.mesh) {
-            // Reset all other materials
-            n.mesh.material.forEach(mat => {
-                if (mat.emissive) mat.emissive.setHex(0x000000);
+            n.mesh.traverse(child => {
+                if (child.isMesh && child.material) {
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    mats.forEach(mat => {
+                        if (mat.emissive) mat.emissive.setHex(0x000000);
+                    });
+                }
             });
         }
     });
 
     // Glowing green color visual indicating execution trace
     if (node.mesh) {
-        node.mesh.material.forEach(mat => {
-            if (mat.emissive) mat.emissive.setHex(0x22c55e); // Soft Emerald Emissive glow
+        node.mesh.traverse(child => {
+            if (child.isMesh && child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach(mat => {
+                    if (mat.emissive) mat.emissive.setHex(0x22c55e); // Soft Emerald Emissive glow
+                });
+            }
         });
     }
 
@@ -862,11 +932,16 @@ function stopSimulation() {
     document.getElementById('sim-status-label').classList.replace('text-emerald-400', 'text-gray-400');
     document.getElementById('sim-current-node-label').innerText = "-";
 
-    // Clean mesh emitting highlights
+    // Clean mesh emitting highlights recursively
     nodes.forEach(n => {
         if (n.mesh) {
-            n.mesh.material.forEach(mat => {
-                if (mat.emissive) mat.emissive.setHex(0x000000);
+            n.mesh.traverse(child => {
+                if (child.isMesh && child.material) {
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    mats.forEach(mat => {
+                        if (mat.emissive) mat.emissive.setHex(0x000000);
+                    });
+                }
             });
         }
     });
@@ -1087,6 +1162,7 @@ function saveProject() {
     showToast("保存完了 (Local)");
 }
 
+// 17. UNDO / REDO STATE MACHINE
 function exportJSON() {
     const data = serializeGraph();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1126,7 +1202,6 @@ function serializeGraph() {
     };
 }
 
-// 17. UNDO / REDO STATE MACHINE
 function saveState() {
     const serialized = serializeGraph();
     undoStack.push(JSON.stringify(serialized));
